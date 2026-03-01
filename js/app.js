@@ -7,7 +7,7 @@
 const API_BASE = (
     window.HYDROSENSE_API_BASE ||
     localStorage.getItem('hydrosense-api-base') ||
-    'https://syewan.ynh.fr/obruk-api'
+    '/obruk-api'
 ).replace(/\/+$/, '');
 const API_KEY = window.HYDROSENSE_API_KEY || localStorage.getItem('hydrosense-api-key') || '';
 const INGEST_ENDPOINT = `${API_BASE}/data`;
