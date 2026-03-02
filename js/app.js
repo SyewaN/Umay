@@ -279,17 +279,28 @@ class App {
         };
     }
 
+    parseNumeric(value) {
+        if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+        if (typeof value === 'string') {
+            const normalized = value.trim().replace(',', '.');
+            if (!normalized) return null;
+            const parsed = Number(normalized);
+            return Number.isFinite(parsed) ? parsed : null;
+        }
+        return null;
+    }
+
     normalizeSensorReading(input) {
         if (!input || typeof input !== 'object') return null;
-        const tdsRaw = Number(input.tds_raw ?? input.tdsRaw ?? input.tds ?? input.TDS ?? input.tdsValue ?? input.salinity);
-        const tdsComp = Number(input.tds_comp ?? input.tdsComp ?? input.tds_corrected ?? input.tdsCorrected ?? input.tds ?? input.TDS ?? input.tdsValue ?? input.salinity);
-        const temp = Number(input.temp ?? input.temperature ?? input.sicaklik);
-        const moisture = Number(input.moisture ?? input.humidity ?? input.nem ?? input.soil);
-        const time = Number(input.time ?? input.device_time);
+        const tdsRaw = this.parseNumeric(input.tds_raw ?? input.tdsRaw ?? input.tds ?? input.TDS ?? input.tdsValue ?? input.salinity);
+        const tdsComp = this.parseNumeric(input.tds_comp ?? input.tdsComp ?? input.tds_corrected ?? input.tdsCorrected ?? input.tds ?? input.TDS ?? input.tdsValue ?? input.salinity);
+        const temp = this.parseNumeric(input.temp ?? input.temperature ?? input.sicaklik);
+        const moisture = this.parseNumeric(input.moisture ?? input.humidity ?? input.nem ?? input.soil);
+        const time = this.parseNumeric(input.time ?? input.device_time);
         const fromTime = this.toIsoTimestampFromNumericTime(time);
         const timestamp = input.timestamp || input.syncedAt || fromTime || new Date().toISOString();
-        const lat = Number(input.lat ?? input.latitude);
-        const lon = Number(input.lon ?? input.lng ?? input.longitude);
+        const lat = this.parseNumeric(input.lat ?? input.latitude);
+        const lon = this.parseNumeric(input.lon ?? input.lng ?? input.longitude);
 
         const safeTdsRaw = Number.isFinite(tdsRaw) ? tdsRaw : null;
         const safeTdsComp = Number.isFinite(tdsComp) ? tdsComp : null;
@@ -330,19 +341,58 @@ class App {
      * UTF-8 metnini JSON parse edip beklenen sensör alanlarına map eder.
      */
     parseSensorPayload(text) {
-        const parsed = JSON.parse(text);
+        const list = this.parseSensorPayloadList(text);
+        return list[list.length - 1];
+    }
+
+    parseSensorPayloadList(text) {
+        const parsed = this.parseJsonPayload(text);
         if (Array.isArray(parsed?.data)) {
+            const readings = [];
             for (let i = parsed.data.length - 1; i >= 0; i -= 1) {
                 const normalized = this.normalizeSensorReading(parsed.data[i]);
-                if (normalized) return normalized;
+                if (normalized) readings.push(normalized);
             }
+            if (readings.length) return readings.reverse();
             throw new Error('data[] içinde geçerli sensör kaydı yok');
         }
         const normalized = this.normalizeSensorReading(parsed);
         if (!normalized) {
             throw new Error('Geçerli sensör kaydı bulunamadı');
         }
-        return normalized;
+        return [normalized];
+    }
+
+    parseJsonPayload(text) {
+        const raw = String(text ?? '').trim();
+        if (!raw) throw new Error('Boş payload');
+        try {
+            return JSON.parse(raw);
+        } catch (_) {
+            const firstBrace = raw.indexOf('{');
+            const lastBrace = raw.lastIndexOf('}');
+            if (firstBrace !== -1 && lastBrace > firstBrace) {
+                const candidate = raw.slice(firstBrace, lastBrace + 1);
+                return JSON.parse(candidate);
+            }
+            const firstBracket = raw.indexOf('[');
+            const lastBracket = raw.lastIndexOf(']');
+            if (firstBracket !== -1 && lastBracket > firstBracket) {
+                const candidate = raw.slice(firstBracket, lastBracket + 1);
+                return JSON.parse(candidate);
+            }
+            throw new Error('Payload içinde JSON bulunamadı');
+        }
+    }
+
+    appendReadingToHistory(reading) {
+        if (!reading || typeof reading !== 'object') return;
+        const hasBleValue = Number.isFinite(reading.tdsRaw) || Number.isFinite(reading.tdsComp) || Number.isFinite(reading.temp);
+        if (!hasBleValue) return;
+        this.serverHistory.push(reading);
+        if (this.serverHistory.length > 240) {
+            this.serverHistory = this.serverHistory.slice(-240);
+        }
     }
 
     /**
@@ -350,16 +400,24 @@ class App {
      */
     processIncomingSensorText(text) {
         try {
-            const data = this.parseSensorPayload(text);
-            this.persistDataPoint(data);
-            this.latestReading = data;
-            this.upsertSensorFromReading(data);
-            this.updateLiveValues(data);
+            const readings = this.parseSensorPayloadList(text);
+            readings.forEach((data) => {
+                this.persistDataPoint(data);
+                this.upsertSensorFromReading(data);
+                this.appendReadingToHistory(data);
+            });
+            const latest = readings[readings.length - 1];
+            this.latestReading = latest;
+            this.updateLiveValues(latest);
+            this.updateLastSyncValue(latest.timestamp);
+            this.updateCharts();
             this.updateDataStatus();
             if (navigator.onLine) {
-                sendToAPI(this.toApiPayload(data)).catch(() => {
-                    this.updateDataStatus('API gönderimi başarısız, localde saklandı');
-                });
+                Promise.allSettled(readings.map((row) => sendToAPI(this.toApiPayload(row))))
+                    .then((results) => {
+                        const hasFailure = results.some((r) => r.status === 'rejected');
+                        if (hasFailure) this.updateDataStatus('API gönderimi kısmen başarısız, localde saklandı');
+                    });
             }
         } catch (err) {
             this.updateDataStatus('JSON parse hatası');
@@ -734,8 +792,12 @@ class App {
 
                         if (normalized) {
                             this.latestReading = normalized;
+                            this.upsertSensorFromReading(normalized);
+                            this.appendReadingToHistory(normalized);
                             this.updateLiveValues(normalized);
                             this.updateLastSyncValue(normalized.timestamp);
+                            this.updateCharts();
+                            this.render();
                         }
 
                         this.bleConnected = true;
@@ -831,11 +893,15 @@ class App {
         const tdsRawEl = document.getElementById('liveTdsRaw');
         const tdsCompEl = document.getElementById('liveTdsComp');
         const tempEl = document.getElementById('liveTemp');
-        const liveTdsRaw = Number.isFinite(data.tdsRaw) ? data.tdsRaw : data.tds;
-        const liveTdsComp = Number.isFinite(data.tdsComp) ? data.tdsComp : data.tds;
+        const dataTdsRaw = this.parseNumeric(data.tdsRaw);
+        const dataTdsComp = this.parseNumeric(data.tdsComp);
+        const dataTds = this.parseNumeric(data.tds);
+        const dataTemp = this.parseNumeric(data.temp);
+        const liveTdsRaw = Number.isFinite(dataTdsRaw) ? dataTdsRaw : dataTds;
+        const liveTdsComp = Number.isFinite(dataTdsComp) ? dataTdsComp : dataTds;
         if (tdsRawEl) tdsRawEl.textContent = Number.isFinite(liveTdsRaw) ? `${liveTdsRaw} ppm` : '-';
         if (tdsCompEl) tdsCompEl.textContent = Number.isFinite(liveTdsComp) ? `${liveTdsComp} ppm` : '-';
-        if (tempEl) tempEl.textContent = Number.isFinite(data.temp) ? `${data.temp}°C` : '-';
+        if (tempEl) tempEl.textContent = Number.isFinite(dataTemp) ? `${dataTemp}°C` : '-';
 
         // Minimal dashboard uyumluluğu (varsa bu id'lere de yaz)
         const soilEl = document.getElementById('soil');
@@ -904,12 +970,12 @@ class App {
     }
 
     async refreshWeatherFromApi() {
-        if (!navigator.onLine) return;
         const coords = this.getEspCoordinates();
         const params = new URLSearchParams({
             latitude: String(coords.lat),
             longitude: String(coords.lon),
             current: 'temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m',
+            current_weather: 'true',
             timezone: 'auto'
         });
 
@@ -917,15 +983,15 @@ class App {
             const res = await fetch(`${WEATHER_API_URL}?${params.toString()}`, { cache: 'no-store' });
             if (!res.ok) throw new Error(`weather HTTP ${res.status}`);
             const payload = await res.json();
-            const current = payload?.current;
-            if (!current) return;
+            const current = payload?.current || payload?.current_weather;
+            if (!current) throw new Error('weather current verisi yok');
             const entry = {
                 timestamp: current.time || new Date().toISOString(),
-                temperature: Number(current.temperature_2m),
-                humidity: Number(current.relative_humidity_2m),
-                windSpeed: Number(current.wind_speed_10m),
-                code: Number(current.weather_code),
-                description: this.weatherDescriptionFromCode(Number(current.weather_code))
+                temperature: this.parseNumeric(current.temperature_2m ?? current.temperature),
+                humidity: this.parseNumeric(current.relative_humidity_2m),
+                windSpeed: this.parseNumeric(current.wind_speed_10m ?? current.windspeed),
+                code: this.parseNumeric(current.weather_code ?? current.weathercode),
+                description: this.weatherDescriptionFromCode(Number(current.weather_code ?? current.weathercode))
             };
             this.weatherNow = entry;
             this.weatherHistory.push(entry);

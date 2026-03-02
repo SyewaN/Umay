@@ -40,6 +40,17 @@
     return queue;
   }
 
+  function parseNumeric(value) {
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    if (typeof value === 'string') {
+      const normalized = value.trim().replace(',', '.');
+      if (!normalized) return null;
+      const parsed = Number(normalized);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
+  }
+
   function toIsoTimestampFromNumericTime(value) {
     if (!Number.isFinite(value)) return null;
     let unixMs = null;
@@ -51,11 +62,11 @@
   }
 
   function normalizeReading(raw) {
-    const tdsRaw = Number(raw?.tds_raw ?? raw?.tdsRaw ?? raw?.tds ?? raw?.TDS ?? raw?.tdsValue ?? raw?.salinity);
-    const tdsComp = Number(raw?.tds_comp ?? raw?.tdsComp ?? raw?.tds_corrected ?? raw?.tdsCorrected ?? raw?.tds ?? raw?.TDS ?? raw?.tdsValue ?? raw?.salinity);
-    const moisture = Number(raw?.moisture ?? raw?.humidity ?? raw?.nem ?? raw?.soil);
-    const temp = Number(raw?.temp ?? raw?.temperature ?? raw?.sicaklik);
-    const time = Number(raw?.time ?? raw?.device_time);
+    const tdsRaw = parseNumeric(raw?.tds_raw ?? raw?.tdsRaw ?? raw?.tds ?? raw?.TDS ?? raw?.tdsValue ?? raw?.salinity);
+    const tdsComp = parseNumeric(raw?.tds_comp ?? raw?.tdsComp ?? raw?.tds_corrected ?? raw?.tdsCorrected ?? raw?.tds ?? raw?.TDS ?? raw?.tdsValue ?? raw?.salinity);
+    const moisture = parseNumeric(raw?.moisture ?? raw?.humidity ?? raw?.nem ?? raw?.soil);
+    const temp = parseNumeric(raw?.temp ?? raw?.temperature ?? raw?.sicaklik);
+    const time = parseNumeric(raw?.time ?? raw?.device_time);
     const timestamp = raw?.timestamp || raw?.syncedAt || toIsoTimestampFromNumericTime(time) || new Date().toISOString();
     const tds = Number.isFinite(tdsComp) ? tdsComp : (Number.isFinite(tdsRaw) ? tdsRaw : null);
 
@@ -101,21 +112,41 @@
 
   function parsePayload(text) {
     let parsed;
+    const raw = String(text ?? '').trim();
     try {
-      parsed = JSON.parse(text);
+      parsed = JSON.parse(raw);
     } catch (err) {
-      throw new Error('Cihaz verisi JSON formatında değil');
+      const firstBrace = raw.indexOf('{');
+      const lastBrace = raw.lastIndexOf('}');
+      const firstBracket = raw.indexOf('[');
+      const lastBracket = raw.lastIndexOf(']');
+
+      try {
+        if (firstBrace !== -1 && lastBrace > firstBrace) {
+          parsed = JSON.parse(raw.slice(firstBrace, lastBrace + 1));
+        } else if (firstBracket !== -1 && lastBracket > firstBracket) {
+          parsed = JSON.parse(raw.slice(firstBracket, lastBracket + 1));
+        } else {
+          throw new Error('JSON bulunamadi');
+        }
+      } catch (_e) {
+        throw new Error('Cihaz verisi JSON formatında değil');
+      }
     }
     if (Array.isArray(parsed?.data)) {
+      const readings = [];
       for (let i = parsed.data.length - 1; i >= 0; i -= 1) {
         const row = normalizeReading(parsed.data[i]);
         if (row && (Number.isFinite(row.tdsRaw) || Number.isFinite(row.tdsComp) || Number.isFinite(row.temp))) {
-          return row;
+          readings.push(row);
         }
       }
+      if (readings.length) return readings.reverse();
       throw new Error('data[] içinde geçerli kayıt yok');
     }
-    return normalizeReading(parsed);
+    const single = normalizeReading(parsed);
+    if (!single) throw new Error('Geçerli sensör kaydı yok');
+    return [single];
   }
 
   async function readDevice(onStatus) {
@@ -212,8 +243,8 @@
     },
 
     async sync(onStatus) {
-      const reading = await readDevice(onStatus);
-      enqueue(reading);
+      const readings = await readDevice(onStatus);
+      readings.forEach((reading) => enqueue(reading));
       try {
         await flushQueue(onStatus);
         emit(onStatus, '✅ Gönderildi!');
@@ -221,7 +252,7 @@
         // BLE okuma başarılıysa veriyi localde tut ve sync'i düşürme.
         emit(onStatus, 'BLE okundu, gönderim beklemede');
       }
-      return reading;
+      return readings[readings.length - 1] || null;
     },
 
     getLocal() {
