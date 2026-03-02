@@ -27,6 +27,8 @@ const BLE_DEVICE_NAME = 'TarlaSensor';
 const BLE_SERVICE_UUID = '12345678-1234-1234-1234-123456789abc';
 const BLE_CHARACTERISTIC_UUID = '87654321-4321-4321-4321-cba987654321';
 const BLE_SYNC_API_URL = INGEST_ENDPOINT;
+const WEATHER_API_URL = 'https://api.open-meteo.com/v1/forecast';
+const WEATHER_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
 
 window.BLE_SYNC_DEVICE_NAME = BLE_DEVICE_NAME;
 window.BLE_SYNC_SERVICE_UUID = BLE_SERVICE_UUID;
@@ -101,6 +103,8 @@ class App {
         this.bleConnected = false;
         this.mockMode = false;
         this.serverHistory = [];
+        this.weatherHistory = [];
+        this.weatherNow = null;
         this.charts = {};
         this.onCharacteristicChanged = this.onCharacteristicChanged.bind(this);
         this.init();
@@ -174,10 +178,14 @@ class App {
         this.loadLatestFromLocal();
         this.refreshLatestFromApi();
         this.refreshHistoryFromApi();
+        this.refreshWeatherFromApi();
         // Local queue -> AWS/PM2 ingest (hafif periyot)
         setInterval(() => {
             this.autoSyncWhenOnline();
         }, 60000);
+        setInterval(() => {
+            this.refreshWeatherFromApi();
+        }, WEATHER_REFRESH_INTERVAL_MS);
         
         // Update timestamp
         this.updateTimestamp();
@@ -259,12 +267,63 @@ class App {
      * Mock data üretimi (geliştirme fallback).
      */
     getMockSensorData() {
+        const tdsRaw = Math.round(500 + Math.random() * 1800);
+        const tdsComp = Math.max(0, tdsRaw - Math.round(5 + Math.random() * 30));
         return {
-            tds: Math.round(500 + Math.random() * 1800),
-            moisture: Math.round(Math.random() * 100),
+            tds: tdsComp,
+            tdsRaw,
+            tdsComp,
+            moisture: null,
             temp: Number((15 + Math.random() * 15).toFixed(1)),
             timestamp: new Date().toISOString()
         };
+    }
+
+    normalizeSensorReading(input) {
+        if (!input || typeof input !== 'object') return null;
+        const tdsRaw = Number(input.tds_raw ?? input.tdsRaw ?? input.tds ?? input.TDS ?? input.tdsValue ?? input.salinity);
+        const tdsComp = Number(input.tds_comp ?? input.tdsComp ?? input.tds_corrected ?? input.tdsCorrected ?? input.tds ?? input.TDS ?? input.tdsValue ?? input.salinity);
+        const temp = Number(input.temp ?? input.temperature ?? input.sicaklik);
+        const moisture = Number(input.moisture ?? input.humidity ?? input.nem ?? input.soil);
+        const time = Number(input.time ?? input.device_time);
+        const fromTime = this.toIsoTimestampFromNumericTime(time);
+        const timestamp = input.timestamp || input.syncedAt || fromTime || new Date().toISOString();
+        const lat = Number(input.lat ?? input.latitude);
+        const lon = Number(input.lon ?? input.lng ?? input.longitude);
+
+        const safeTdsRaw = Number.isFinite(tdsRaw) ? tdsRaw : null;
+        const safeTdsComp = Number.isFinite(tdsComp) ? tdsComp : null;
+        const safeTemp = Number.isFinite(temp) ? temp : null;
+        const safeMoisture = Number.isFinite(moisture) ? moisture : null;
+        const safeLat = Number.isFinite(lat) ? lat : null;
+        const safeLon = Number.isFinite(lon) ? lon : null;
+        const tds = Number.isFinite(safeTdsComp) ? safeTdsComp : safeTdsRaw;
+
+        if (tds === null && safeTemp === null) return null;
+
+        return {
+            tds,
+            tdsRaw: safeTdsRaw,
+            tdsComp: safeTdsComp,
+            moisture: safeMoisture,
+            temp: safeTemp,
+            time: Number.isFinite(time) ? time : null,
+            timestamp,
+            sensorId: input.sensor_id || input.sensorId || ESP_SENSOR_ID,
+            sensorName: input.sensor_name || input.sensorName || ESP_SENSOR_NAME,
+            lat: safeLat,
+            lon: safeLon
+        };
+    }
+
+    toIsoTimestampFromNumericTime(value) {
+        if (!Number.isFinite(value)) return null;
+        let unixMs = null;
+        if (value > 1e12) unixMs = value;
+        else if (value > 1e9) unixMs = value * 1000;
+        if (!unixMs) return null;
+        const date = new Date(unixMs);
+        return Number.isNaN(date.getTime()) ? null : date.toISOString();
     }
 
     /**
@@ -272,12 +331,18 @@ class App {
      */
     parseSensorPayload(text) {
         const parsed = JSON.parse(text);
-        return {
-            tds: Number(parsed.tds),
-            moisture: Number(parsed.moisture),
-            temp: Number(parsed.temp),
-            timestamp: new Date().toISOString()
-        };
+        if (Array.isArray(parsed?.data)) {
+            for (let i = parsed.data.length - 1; i >= 0; i -= 1) {
+                const normalized = this.normalizeSensorReading(parsed.data[i]);
+                if (normalized) return normalized;
+            }
+            throw new Error('data[] içinde geçerli sensör kaydı yok');
+        }
+        const normalized = this.normalizeSensorReading(parsed);
+        if (!normalized) {
+            throw new Error('Geçerli sensör kaydı bulunamadı');
+        }
+        return normalized;
     }
 
     /**
@@ -307,6 +372,9 @@ class App {
             soil: Number.isFinite(data?.moisture) ? data.moisture : null,
             salinity: Number.isFinite(data?.tds) ? data.tds : null,
             temp: Number.isFinite(data?.temp) ? data.temp : null,
+            time: Number.isFinite(data?.time) ? data.time : null,
+            tds_raw: Number.isFinite(data?.tdsRaw) ? data.tdsRaw : null,
+            tds_comp: Number.isFinite(data?.tdsComp) ? data.tdsComp : null,
             timestamp: data?.timestamp || new Date().toISOString(),
             sensor_id: data?.sensorId || data?.sensor_id || ESP_SENSOR_ID,
             sensor_name: data?.sensorName || data?.sensor_name || ESP_SENSOR_NAME,
@@ -446,9 +514,21 @@ class App {
             const history = await this.fetchDashboardHistory();
             if (!history.length) return;
 
-            this.serverHistory = history
-                .map((row) => this.normalizeSyncedReading(row))
-                .filter((row) => row && Number.isFinite(row.tds));
+            const normalizedRows = [];
+            history.forEach((row) => {
+                if (Array.isArray(row?.data)) {
+                    row.data.forEach((inner) => {
+                        const normalized = this.normalizeSyncedReading(inner);
+                        if (normalized) normalizedRows.push(normalized);
+                    });
+                    return;
+                }
+                const normalized = this.normalizeSyncedReading(row);
+                if (normalized) normalizedRows.push(normalized);
+            });
+
+            this.serverHistory = normalizedRows
+                .filter((row) => Number.isFinite(row.tdsRaw) || Number.isFinite(row.tdsComp) || Number.isFinite(row.temp));
 
             if (!this.serverHistory.length) return;
             this.serverHistory.forEach((row) => this.upsertSensorFromReading(row, false));
@@ -552,33 +632,14 @@ class App {
 
     normalizeSyncedReading(data) {
         if (!data || typeof data !== "object") return null;
-        // API format uyumluluğu:
-        // - BLE payload: { tds, moisture, temp }
-        // - Backend latest: { soil, salinity, ... }
-        const tds = Number(data.tds ?? data.TDS ?? data.tdsValue ?? data.salinity);
-        const moisture = Number(data.moisture ?? data.humidity ?? data.nem ?? data.soil);
-        const temp = Number(data.temp ?? data.temperature ?? data.sicaklik);
-        const timestamp = data.timestamp || data.syncedAt || new Date().toISOString();
-        const lat = Number(data.lat ?? data.latitude);
-        const lon = Number(data.lon ?? data.lng ?? data.longitude);
-
-        const safeTds = Number.isFinite(tds) ? tds : null;
-        const safeMoisture = Number.isFinite(moisture) ? moisture : null;
-        const safeTemp = Number.isFinite(temp) ? temp : null;
-        const safeLat = Number.isFinite(lat) ? lat : null;
-        const safeLon = Number.isFinite(lon) ? lon : null;
-        if (safeTds === null && safeMoisture === null && safeTemp === null) return null;
-
-        return {
-            tds: safeTds,
-            moisture: safeMoisture,
-            temp: safeTemp,
-            timestamp,
-            sensorId: data.sensor_id || data.sensorId || ESP_SENSOR_ID,
-            sensorName: data.sensor_name || data.sensorName || ESP_SENSOR_NAME,
-            lat: safeLat,
-            lon: safeLon
-        };
+        if (Array.isArray(data.data)) {
+            for (let i = data.data.length - 1; i >= 0; i -= 1) {
+                const normalized = this.normalizeSensorReading(data.data[i]);
+                if (normalized) return normalized;
+            }
+            return null;
+        }
+        return this.normalizeSensorReading(data);
     }
 
     inferRiskFromTds(tds) {
@@ -767,11 +828,13 @@ class App {
 
     updateLiveValues(data) {
         if (!data || typeof data !== 'object') return;
-        const tdsEl = document.getElementById('liveTds');
-        const moistureEl = document.getElementById('liveMoisture');
+        const tdsRawEl = document.getElementById('liveTdsRaw');
+        const tdsCompEl = document.getElementById('liveTdsComp');
         const tempEl = document.getElementById('liveTemp');
-        if (tdsEl) tdsEl.textContent = Number.isFinite(data.tds) ? `${data.tds} ppm` : '-';
-        if (moistureEl) moistureEl.textContent = Number.isFinite(data.moisture) ? `${data.moisture}%` : '-';
+        const liveTdsRaw = Number.isFinite(data.tdsRaw) ? data.tdsRaw : data.tds;
+        const liveTdsComp = Number.isFinite(data.tdsComp) ? data.tdsComp : data.tds;
+        if (tdsRawEl) tdsRawEl.textContent = Number.isFinite(liveTdsRaw) ? `${liveTdsRaw} ppm` : '-';
+        if (tdsCompEl) tdsCompEl.textContent = Number.isFinite(liveTdsComp) ? `${liveTdsComp} ppm` : '-';
         if (tempEl) tempEl.textContent = Number.isFinite(data.temp) ? `${data.temp}°C` : '-';
 
         // Minimal dashboard uyumluluğu (varsa bu id'lere de yaz)
@@ -779,6 +842,101 @@ class App {
         const salinityEl = document.getElementById('salinity');
         if (soilEl) soilEl.textContent = Number.isFinite(data.moisture) ? `${data.moisture}` : '-';
         if (salinityEl) salinityEl.textContent = Number.isFinite(data.tds) ? `${data.tds}` : '-';
+    }
+
+    getEspCoordinates() {
+        const sensor = this.sensors.find((s) => s.id === ESP_SENSOR_ID);
+        const lat = Number(sensor?.lat);
+        const lon = Number(sensor?.lon);
+        if (Number.isFinite(lat) && Number.isFinite(lon)) {
+            return { lat, lon };
+        }
+        try {
+            const raw = localStorage.getItem(ESP_LOCATION_KEY);
+            if (raw) {
+                const parsed = JSON.parse(raw);
+                const savedLat = Number(parsed?.lat);
+                const savedLon = Number(parsed?.lon);
+                if (Number.isFinite(savedLat) && Number.isFinite(savedLon)) {
+                    return { lat: savedLat, lon: savedLon };
+                }
+            }
+        } catch (_) {}
+        return { lat: DEFAULT_ESP_LAT, lon: DEFAULT_ESP_LON };
+    }
+
+    weatherDescriptionFromCode(code) {
+        const map = {
+            0: 'Açık',
+            1: 'Az bulutlu',
+            2: 'Parçalı bulutlu',
+            3: 'Kapalı',
+            45: 'Sisli',
+            48: 'Kırağı sisli',
+            51: 'Çisenti',
+            53: 'Çisenti',
+            55: 'Yoğun çisenti',
+            56: 'Donan çisenti',
+            57: 'Donan çisenti',
+            61: 'Yağmurlu',
+            63: 'Yağmurlu',
+            65: 'Şiddetli yağmur',
+            71: 'Kar',
+            73: 'Kar',
+            75: 'Yoğun kar',
+            80: 'Sağanak',
+            81: 'Sağanak',
+            82: 'Şiddetli sağanak',
+            95: 'Fırtına'
+        };
+        return map[code] || 'Bilinmiyor';
+    }
+
+    updateWeatherValue() {
+        const weatherEl = document.getElementById('liveWeather');
+        if (!weatherEl) return;
+        if (!this.weatherNow || !Number.isFinite(this.weatherNow.temperature)) {
+            weatherEl.textContent = '-';
+            return;
+        }
+        const label = this.weatherNow.description || 'Hava';
+        weatherEl.textContent = `${this.weatherNow.temperature}°C • ${label}`;
+    }
+
+    async refreshWeatherFromApi() {
+        if (!navigator.onLine) return;
+        const coords = this.getEspCoordinates();
+        const params = new URLSearchParams({
+            latitude: String(coords.lat),
+            longitude: String(coords.lon),
+            current: 'temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m',
+            timezone: 'auto'
+        });
+
+        try {
+            const res = await fetch(`${WEATHER_API_URL}?${params.toString()}`, { cache: 'no-store' });
+            if (!res.ok) throw new Error(`weather HTTP ${res.status}`);
+            const payload = await res.json();
+            const current = payload?.current;
+            if (!current) return;
+            const entry = {
+                timestamp: current.time || new Date().toISOString(),
+                temperature: Number(current.temperature_2m),
+                humidity: Number(current.relative_humidity_2m),
+                windSpeed: Number(current.wind_speed_10m),
+                code: Number(current.weather_code),
+                description: this.weatherDescriptionFromCode(Number(current.weather_code))
+            };
+            this.weatherNow = entry;
+            this.weatherHistory.push(entry);
+            if (this.weatherHistory.length > 96) {
+                this.weatherHistory = this.weatherHistory.slice(-96);
+            }
+            this.updateWeatherValue();
+            this.updateCharts();
+        } catch (err) {
+            console.error('Weather API fetch failed:', err);
+        }
     }
 
     // ====== THEME MANAGEMENT ======
@@ -902,7 +1060,7 @@ class App {
                 'farmer.cropsTitle': '🪴 Ekilen Ürünler: Tuzluluk & pH',
                 'farmer.yieldTitle': '📉 Verim Düşüşü Eğilimi',
                 'farmer.moistureTitle': '💧 Toprak Nem Göstergesi',
-                'academy.tdsTitle': 'TDS Seviyesi (Zaman Serisi)',
+                'academy.tdsTitle': 'BLE Veri Serisi (TDS Raw/Comp + Sıcaklık)',
                 'academy.riskTitle': 'Risk Dağılımı',
                 'academy.compareTitle': 'Sensör Karşılaştırması',
                 'academy.statsTitle': 'İstatistiksel Özet',
@@ -966,7 +1124,7 @@ class App {
                 'farmer.cropsTitle': '🪴 Planted Crops: Salinity & pH',
                 'farmer.yieldTitle': '📉 Yield Decline Trend',
                 'farmer.moistureTitle': '💧 Soil Moisture Gauge',
-                'academy.tdsTitle': 'TDS Level (Time Series)',
+                'academy.tdsTitle': 'BLE Series (TDS Raw/Comp + Temperature)',
                 'academy.riskTitle': 'Risk Distribution',
                 'academy.compareTitle': 'Sensor Comparison',
                 'academy.statsTitle': 'Statistical Summary',
@@ -1230,6 +1388,7 @@ class App {
         this.selectedSensor = ESP_SENSOR_ID;
         this.render();
         this.focusMapOnEsp(lat, lon);
+        this.refreshWeatherFromApi();
         if (!persisted) {
             this.updateDataStatus('Konum uygulandı (local kayıt başarısız)');
         }
@@ -1421,103 +1580,111 @@ class App {
         Chart.defaults.color = chartColors.text;
         Chart.defaults.borderColor = chartColors.grid;
         
-        // Chart 1: TDS Time Series
-        const tdsCtx = document.getElementById('tdsChart').getContext('2d');
-        this.charts.tds = new Chart(tdsCtx, {
-            type: 'line',
-            data: {
-                labels: [],
-                datasets: [{
-                    label: 'TDS Seviyesi (ppm)',
-                    data: [],
-                    borderColor: chartColors.line,
-                    backgroundColor: 'rgba(136, 192, 208, 0.05)',
-                    borderWidth: 2,
-                    fill: true,
-                    tension: 0.4,
-                    pointRadius: 4,
-                    pointBackgroundColor: chartColors.accent,
-                    pointBorderColor: chartColors.accent,
-                    pointHoverRadius: 6
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: { display: false }
+        // Chart 1: BLE Time Series (tds_raw / tds_comp / temp)
+        const tdsCanvas = document.getElementById('tdsChart');
+        if (tdsCanvas) {
+            const tdsCtx = tdsCanvas.getContext('2d');
+            this.charts.tds = new Chart(tdsCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'TDS Raw (ppm)',
+                        data: [],
+                        borderColor: chartColors.line,
+                        backgroundColor: 'rgba(136, 192, 208, 0.08)',
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.25
+                    }, {
+                        label: 'TDS Comp (ppm)',
+                        data: [],
+                        borderColor: chartColors.accent,
+                        backgroundColor: 'rgba(129, 161, 193, 0.05)',
+                        borderWidth: 2,
+                        fill: false,
+                        tension: 0.25
+                    }, {
+                        label: 'Sıcaklık (°C)',
+                        data: [],
+                        borderColor: chartColors.high,
+                        backgroundColor: 'rgba(191, 97, 106, 0.06)',
+                        borderWidth: 2,
+                        fill: false,
+                        tension: 0.25,
+                        yAxisID: 'yTemp'
+                    }]
                 },
-                scales: {
-                    y: {
-                        beginAtZero: true,
-                        ticks: { color: chartColors.text }
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: true }
                     },
-                    x: {
-                        ticks: { color: chartColors.text }
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            ticks: { color: chartColors.text },
+                            title: { display: true, text: 'ppm' }
+                        },
+                        yTemp: {
+                            position: 'right',
+                            ticks: { color: chartColors.text },
+                            grid: { drawOnChartArea: false },
+                            title: { display: true, text: '°C' }
+                        },
+                        x: {
+                            ticks: { color: chartColors.text }
+                        }
                     }
                 }
-            }
-        });
-        
-        // Chart 2: Risk Distribution (Pie)
-        const riskCtx = document.getElementById('riskChart').getContext('2d');
-        this.charts.risk = new Chart(riskCtx, {
-            type: 'doughnut',
-            data: {
-                labels: ['Düşük Risk', 'Orta Risk', 'Yüksek Risk'],
-                datasets: [{
-                    data: this.calculateRiskDistribution(),
-                    backgroundColor: [
-                        chartColors.low,
-                        chartColors.medium,
-                        chartColors.high
-                    ],
-                    borderColor: chartColors.grid,
-                    borderWidth: 2
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: { position: 'bottom' }
-                }
-            }
-        });
-        
-        // Chart 3: Sensor Comparison (Bar)
-        const compCtx = document.getElementById('comparisonChart').getContext('2d');
-        this.charts.comparison = new Chart(compCtx, {
-            type: 'bar',
-            data: {
-                labels: this.getTopSensorNames(5),
-                datasets: [{
-                    label: 'TDS (ppm)',
-                    data: this.getTopSensorValues(5),
-                    backgroundColor: chartColors.accent,
-                    borderColor: chartColors.accent,
-                    borderWidth: 1,
-                    borderRadius: 4
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                indexAxis: 'y',
-                plugins: {
-                    legend: { display: false }
+            });
+        }
+
+        // Chart 2: Weather Time Series (API)
+        const weatherCanvas = document.getElementById('weatherChart');
+        if (weatherCanvas) {
+            const weatherCtx = weatherCanvas.getContext('2d');
+            this.charts.weather = new Chart(weatherCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Hava Sıcaklığı (°C)',
+                        data: [],
+                        borderColor: chartColors.accent,
+                        backgroundColor: 'rgba(129, 161, 193, 0.08)',
+                        borderWidth: 2,
+                        tension: 0.25,
+                        fill: true
+                    }, {
+                        label: 'Nem (%)',
+                        data: [],
+                        borderColor: chartColors.low,
+                        backgroundColor: 'rgba(163, 190, 140, 0.05)',
+                        borderWidth: 2,
+                        tension: 0.25,
+                        fill: false
+                    }]
                 },
-                scales: {
-                    x: {
-                        beginAtZero: true,
-                        ticks: { color: chartColors.text }
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: true }
                     },
-                    y: {
-                        ticks: { color: chartColors.text }
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            ticks: { color: chartColors.text }
+                        },
+                        x: {
+                            ticks: { color: chartColors.text }
+                        }
                     }
                 }
-            }
-        });
+            });
+        }
 
         // Farmer mode charts
         this.initFarmerCharts(chartColors);
@@ -1525,26 +1692,30 @@ class App {
 
     updateCharts() {
         if (this.charts.tds) {
-            const recent = this.serverHistory.slice(-14);
+            const recent = this.serverHistory.slice(-40);
             this.charts.tds.data.labels = recent.map((row) => {
                 const d = new Date(row.timestamp);
                 return Number.isNaN(d.getTime())
                     ? '-'
                     : d.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
             });
-            this.charts.tds.data.datasets[0].data = recent.map((row) => row.tds);
+            this.charts.tds.data.datasets[0].data = recent.map((row) => row.tdsRaw);
+            this.charts.tds.data.datasets[1].data = recent.map((row) => row.tdsComp);
+            this.charts.tds.data.datasets[2].data = recent.map((row) => row.temp);
             this.charts.tds.update();
         }
 
-        if (this.charts.risk) {
-            this.charts.risk.data.datasets[0].data = this.calculateRiskDistribution();
-            this.charts.risk.update();
-        }
-
-        if (this.charts.comparison) {
-            this.charts.comparison.data.labels = this.getTopSensorNames(5);
-            this.charts.comparison.data.datasets[0].data = this.getTopSensorValues(5);
-            this.charts.comparison.update();
+        if (this.charts.weather) {
+            const recentWeather = this.weatherHistory.slice(-24);
+            this.charts.weather.data.labels = recentWeather.map((row) => {
+                const d = new Date(row.timestamp);
+                return Number.isNaN(d.getTime())
+                    ? '-'
+                    : d.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+            });
+            this.charts.weather.data.datasets[0].data = recentWeather.map((row) => row.temperature);
+            this.charts.weather.data.datasets[1].data = recentWeather.map((row) => row.humidity);
+            this.charts.weather.update();
         }
     }
 
@@ -1795,14 +1966,18 @@ class App {
     // ====== STATS UPDATE ======
     updateStats() {
         const count = this.filteredSensors.length;
+        const setText = (id, value) => {
+            const el = document.getElementById(id);
+            if (el) el.textContent = value;
+        };
         
         if (count === 0) {
-            document.getElementById('sensorCount').textContent = '0';
-            document.getElementById('avgTds').textContent = '-';
-            document.getElementById('maxTds').textContent = '-';
-            document.getElementById('minTds').textContent = '-';
-            document.getElementById('stdTds').textContent = '-';
-            document.getElementById('anomalyRate').textContent = '-';
+            setText('sensorCount', '0');
+            setText('avgTds', '-');
+            setText('maxTds', '-');
+            setText('minTds', '-');
+            setText('stdTds', '-');
+            setText('anomalyRate', '-');
             return;
         }
         
@@ -1813,12 +1988,12 @@ class App {
         const stdTds = this.calculateStdDev(tdsValues);
         const anomalyRate = ((count * 0.15).toFixed(0) + ' / ' + count);
         
-        document.getElementById('sensorCount').textContent = count;
-        document.getElementById('avgTds').textContent = avgTds.toFixed(0);
-        document.getElementById('maxTds').textContent = maxTds.toFixed(0);
-        document.getElementById('minTds').textContent = minTds.toFixed(0);
-        document.getElementById('stdTds').textContent = stdTds.toFixed(1);
-        document.getElementById('anomalyRate').textContent = anomalyRate;
+        setText('sensorCount', count);
+        setText('avgTds', avgTds.toFixed(0));
+        setText('maxTds', maxTds.toFixed(0));
+        setText('minTds', minTds.toFixed(0));
+        setText('stdTds', stdTds.toFixed(1));
+        setText('anomalyRate', anomalyRate);
     }
 
     calculateStdDev(values) {

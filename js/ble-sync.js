@@ -40,16 +40,32 @@
     return queue;
   }
 
+  function toIsoTimestampFromNumericTime(value) {
+    if (!Number.isFinite(value)) return null;
+    let unixMs = null;
+    if (value > 1e12) unixMs = value;
+    else if (value > 1e9) unixMs = value * 1000;
+    if (!unixMs) return null;
+    const d = new Date(unixMs);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+
   function normalizeReading(raw) {
-    const tds = Number(raw?.tds ?? raw?.TDS ?? raw?.tdsValue);
-    const moisture = Number(raw?.moisture ?? raw?.humidity ?? raw?.nem);
+    const tdsRaw = Number(raw?.tds_raw ?? raw?.tdsRaw ?? raw?.tds ?? raw?.TDS ?? raw?.tdsValue ?? raw?.salinity);
+    const tdsComp = Number(raw?.tds_comp ?? raw?.tdsComp ?? raw?.tds_corrected ?? raw?.tdsCorrected ?? raw?.tds ?? raw?.TDS ?? raw?.tdsValue ?? raw?.salinity);
+    const moisture = Number(raw?.moisture ?? raw?.humidity ?? raw?.nem ?? raw?.soil);
     const temp = Number(raw?.temp ?? raw?.temperature ?? raw?.sicaklik);
-    const timestamp = raw?.timestamp || raw?.syncedAt || new Date().toISOString();
+    const time = Number(raw?.time ?? raw?.device_time);
+    const timestamp = raw?.timestamp || raw?.syncedAt || toIsoTimestampFromNumericTime(time) || new Date().toISOString();
+    const tds = Number.isFinite(tdsComp) ? tdsComp : (Number.isFinite(tdsRaw) ? tdsRaw : null);
 
     return {
-      tds: Number.isFinite(tds) ? tds : null,
+      tds,
+      tdsRaw: Number.isFinite(tdsRaw) ? tdsRaw : null,
+      tdsComp: Number.isFinite(tdsComp) ? tdsComp : null,
       moisture: Number.isFinite(moisture) ? moisture : null,
       temp: Number.isFinite(temp) ? temp : null,
+      time: Number.isFinite(time) ? time : null,
       timestamp
     };
   }
@@ -90,6 +106,15 @@
     } catch (err) {
       throw new Error('Cihaz verisi JSON formatında değil');
     }
+    if (Array.isArray(parsed?.data)) {
+      for (let i = parsed.data.length - 1; i >= 0; i -= 1) {
+        const row = normalizeReading(parsed.data[i]);
+        if (row && (Number.isFinite(row.tdsRaw) || Number.isFinite(row.tdsComp) || Number.isFinite(row.temp))) {
+          return row;
+        }
+      }
+      throw new Error('data[] içinde geçerli kayıt yok');
+    }
     return normalizeReading(parsed);
   }
 
@@ -125,6 +150,9 @@
       soil: Number.isFinite(row?.moisture) ? row.moisture : null,
       salinity: Number.isFinite(row?.tds) ? row.tds : null,
       temp: Number.isFinite(row?.temp) ? row.temp : null,
+      time: Number.isFinite(row?.time) ? row.time : null,
+      tds_raw: Number.isFinite(row?.tdsRaw) ? row.tdsRaw : null,
+      tds_comp: Number.isFinite(row?.tdsComp) ? row.tdsComp : null,
       timestamp: row?.timestamp || new Date().toISOString(),
       moisture: Number.isFinite(row?.moisture) ? row.moisture : null,
       tds: Number.isFinite(row?.tds) ? row.tds : null
