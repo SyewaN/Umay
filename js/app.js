@@ -812,9 +812,15 @@ class App {
 
                 try {
                     if (window.BLESync && typeof window.BLESync.sync === 'function') {
-                        const result = await window.BLESync.sync((message) => {
+                        const syncResult = await window.BLESync.sync((message) => {
                             this.updateDataStatus(message || 'Veri okunuyor...');
                         });
+                        const result = (syncResult && typeof syncResult === 'object' && 'reading' in syncResult)
+                            ? syncResult.reading
+                            : syncResult;
+                        const uploadError = (syncResult && typeof syncResult === 'object')
+                            ? syncResult.uploadError
+                            : null;
 
                         const normalized =
                             this.normalizeSyncedReading(result) ||
@@ -832,7 +838,12 @@ class App {
 
                         this.bleConnected = true;
                         this.updateConnectionStatus('Cihaz bağlı');
-                        this.updateDataStatus('✅ Gönderildi!');
+                        if (uploadError) {
+                            const msg = String(uploadError?.message || uploadError || 'gonderim beklemede');
+                            this.updateDataStatus(`BLE okundu, gonderim beklemede: ${msg}`);
+                        } else {
+                            this.updateDataStatus('✅ Gönderildi!');
+                        }
                         this.refreshLatestFromApi();
                         this.refreshHistoryFromApi();
                     } else {
