@@ -820,7 +820,7 @@ class App {
                         const result = (syncResult && typeof syncResult === 'object' && 'reading' in syncResult)
                             ? syncResult.reading
                             : syncResult;
-                        const uploadError = (syncResult && typeof syncResult === 'object')
+                        let uploadError = (syncResult && typeof syncResult === 'object')
                             ? syncResult.uploadError
                             : null;
 
@@ -840,6 +840,16 @@ class App {
 
                         this.bleConnected = true;
                         this.updateConnectionStatus('Cihaz bağlı');
+                        if (uploadError && normalized) {
+                            // BLESync icinden POST basarisiz olursa dogrudan uygulama yoluyla tekrar dene.
+                            try {
+                                await sendToAPI(this.toApiPayload(normalized));
+                                await this.sendStoredDataToServer();
+                                uploadError = null;
+                            } catch (fallbackPostErr) {
+                                console.error('Fallback direct POST failed:', fallbackPostErr);
+                            }
+                        }
                         if (uploadError) {
                             const msg = String(uploadError?.message || uploadError || 'gonderim beklemede');
                             this.updateDataStatus(`BLE okundu, gonderim beklemede: ${msg}`);
