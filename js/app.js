@@ -9,9 +9,7 @@ const BLE_SYNC_BASE_URL = (
     localStorage.getItem('ble-sync-base-url') ||
     'https://flnjitprqlxytbcaoptc.supabase.co'
 ).replace(/\/+$/, '');
-const BLE_SYNC_API_KEY = window.BLE_SYNC_API_KEY ||
-    localStorage.getItem('ble-sync-api-key') ||
-    'sb_publishable_5_seWugPhmNDYtGO24NLFQ_ndcG19aL';
+const BLE_SYNC_API_KEY = window.BLE_SYNC_API_KEY || 'sb_publishable_5_seWugPhmNDYtGO24NLFQ_ndcG19aL';
 const BLE_SYNC_DEFAULT_API_URL = `${BLE_SYNC_BASE_URL}/rest/v1/sensor_data`;
 const BLE_SYNC_DEFAULT_READ_URL = `${BLE_SYNC_BASE_URL}/rest/v1/sensor_data?select=*&order=id.desc&limit=200`;
 const BLE_SYNC_API_URL = window.BLE_SYNC_API_URL || BLE_SYNC_DEFAULT_API_URL;
@@ -39,6 +37,10 @@ const WEATHER_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
 
 // Eski localStorage override'lari yanlis endpoint'e tasiyabildigi icin temizle.
 try {
+    const legacyKey = localStorage.getItem('ble-sync-api-key');
+    if (legacyKey && legacyKey !== BLE_SYNC_API_KEY) {
+        localStorage.removeItem('ble-sync-api-key');
+    }
     const legacyWriteUrl = localStorage.getItem('ble-sync-api-url');
     if (legacyWriteUrl && legacyWriteUrl !== BLE_SYNC_DEFAULT_API_URL) {
         localStorage.removeItem('ble-sync-api-url');

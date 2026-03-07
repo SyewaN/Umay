@@ -177,11 +177,18 @@
   async function flushQueue(onStatus) {
     const queue = readLocal();
     if (!queue.length) return { sent: 0, remaining: 0 };
-    const payload = queue.map((row) => ({
-      salt: Number.isFinite(row?.tdsComp) ? row.tdsComp : (Number.isFinite(row?.tdsRaw) ? row.tdsRaw : null),
-      sicaklik: Number.isFinite(row?.temp) ? row.temp : null,
-      sensor_id: row?.sensorId || row?.sensor_id || 'esp-t1'
-    }));
+    const candidates = queue.map((row) => {
+      const salt = parseNumeric(row?.tdsComp ?? row?.tds_comp ?? row?.tdsRaw ?? row?.tds_raw ?? row?.tds ?? row?.salt);
+      const sicaklik = parseNumeric(row?.temp ?? row?.temperature ?? row?.sicaklik);
+      return {
+        original: row,
+        payload: {
+          salt: Number.isFinite(salt) ? salt : null,
+          sicaklik: Number.isFinite(sicaklik) ? sicaklik : null,
+          sensor_id: row?.sensorId || row?.sensor_id || 'esp-t1'
+        }
+      };
+    });
 
     const apiUrl = state.config.apiUrl;
     if (!apiUrl || apiUrl === 'API_URL_BURAYA' || !navigator.onLine) {
@@ -191,7 +198,16 @@
 
     emit(onStatus, 'Sunucuya gönderiliyor...');
     let sent = 0;
-    for (const row of payload) {
+    const remaining = [];
+    const errors = [];
+    for (const item of candidates) {
+      const row = item.payload;
+      const hasAnyValue = Number.isFinite(row.salt) || Number.isFinite(row.sicaklik);
+      if (!hasAnyValue) {
+        // Tamamen bos satiri bir daha denemeye sokma.
+        continue;
+      }
+
       let res;
       let raw = '';
       try {
@@ -202,18 +218,27 @@
         });
         raw = await res.text();
       } catch (err) {
-        emit(onStatus, 'Sunucuya erisilemiyor (network/CORS)');
-        throw err;
+        remaining.push(item.original);
+        errors.push(`network: ${String(err?.message || err)}`);
+        continue;
       }
 
       if (!res.ok) {
-        throw new Error(`Sunucuya gönderim başarısız: ${res.status} ${raw || ''}`.trim());
+        remaining.push(item.original);
+        errors.push(`${res.status} ${raw || ''}`.trim());
+        continue;
       }
       sent += 1;
     }
 
-    writeLocal([]);
-    return { sent, remaining: 0 };
+    writeLocal(remaining);
+    if (errors.length && sent === 0) {
+      throw new Error(`Sunucuya gönderim başarısız: ${errors[0]}`);
+    }
+    if (errors.length) {
+      emit(onStatus, `Kismi gonderim: ${sent} basarili, ${remaining.length} beklemede`);
+    }
+    return { sent, remaining: remaining.length };
   }
 
   const BLESync = {
