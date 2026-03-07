@@ -266,20 +266,10 @@
     async sync(onStatus) {
       const readings = await readDevice(onStatus);
       readings.forEach((reading) => enqueue(reading));
-      let uploadError = null;
-      try {
-        await flushQueue(onStatus);
-        emit(onStatus, '✅ Gönderildi!');
-      } catch (err) {
-        // BLE okuma başarılıysa veriyi localde tut ve sync'i düşürme.
-        const msg = String(err?.message || err || 'gonderim beklemede');
-        emit(onStatus, `BLE okundu, gonderim beklemede: ${msg}`);
-        console.error('BLE upload failed:', err);
-        uploadError = err;
-      }
+      // Gonderim app.js tarafinda merkezi olarak yapilir.
       return {
         reading: readings[readings.length - 1] || null,
-        uploadError
+        uploadError: null
       };
     },
 

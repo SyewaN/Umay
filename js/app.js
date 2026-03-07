@@ -840,14 +840,14 @@ class App {
 
                         this.bleConnected = true;
                         this.updateConnectionStatus('Cihaz bağlı');
-                        if (uploadError && normalized) {
-                            // BLESync icinden POST basarisiz olursa dogrudan uygulama yoluyla tekrar dene.
+                        if (normalized) {
                             try {
                                 await sendToAPI(this.toApiPayload(normalized));
                                 await this.sendStoredDataToServer();
                                 uploadError = null;
-                            } catch (fallbackPostErr) {
-                                console.error('Fallback direct POST failed:', fallbackPostErr);
+                            } catch (postErr) {
+                                uploadError = postErr;
+                                console.error('Sync POST failed:', postErr);
                             }
                         }
                         if (uploadError) {
