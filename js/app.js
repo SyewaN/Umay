@@ -135,6 +135,12 @@ class App {
         this.mockMode = false;
         this.serverHistory = [];
         this.weatherHistory = [];
+        this.modelData = {
+            predictions: [],
+            anomalies: [],
+            dailySummary: [],
+            thresholds: []
+        };
         this.weatherNow = null;
         this.charts = {};
         this.statusLockUntil = 0;
@@ -210,6 +216,7 @@ class App {
         this.loadLatestFromLocal();
         this.refreshLatestFromApi();
         this.refreshHistoryFromApi();
+        this.refreshModelDataFromApi();
         this.refreshWeatherFromApi();
         // Local queue -> AWS/PM2 ingest (hafif periyot)
         setInterval(() => {
@@ -218,6 +225,9 @@ class App {
         setInterval(() => {
             this.refreshWeatherFromApi();
         }, WEATHER_REFRESH_INTERVAL_MS);
+        setInterval(() => {
+            this.refreshModelDataFromApi();
+        }, 45000);
         
         // Update timestamp
         this.updateTimestamp();
@@ -714,6 +724,64 @@ class App {
         return [];
     }
 
+    getSupabaseHeaders() {
+        return {
+            Accept: 'application/json',
+            'Cache-Control': 'no-cache',
+            Pragma: 'no-cache',
+            ...window.BLE_SYNC_API_HEADERS
+        };
+    }
+
+    extractTimestamp(row) {
+        if (!row || typeof row !== 'object') return 0;
+        const raw = row.timestamp || row.created_at || row.day || row.date || row.time || row.ts;
+        const ms = new Date(raw || 0).getTime();
+        return Number.isFinite(ms) ? ms : 0;
+    }
+
+    toSortedRows(payload) {
+        const rows = Array.isArray(payload) ? payload : [];
+        return rows.slice().sort((a, b) => this.extractTimestamp(a) - this.extractTimestamp(b));
+    }
+
+    getNumericFromRow(row, keys) {
+        if (!row || typeof row !== 'object') return null;
+        for (const key of keys) {
+            const val = this.parseNumeric(row[key]);
+            if (Number.isFinite(val)) return val;
+        }
+        return null;
+    }
+
+    async fetchSupabaseTable(tableName, limit = 200) {
+        const endpoint = `${BLE_SYNC_BASE_URL}/rest/v1/${tableName}?select=*&limit=${limit}`;
+        const res = await fetch(endpoint, { cache: 'no-store', headers: this.getSupabaseHeaders() });
+        if (!res.ok) {
+            const body = await res.text();
+            throw new Error(`${tableName} fetch HTTP ${res.status}: ${body || ''}`.trim());
+        }
+        const payload = await res.json();
+        return this.toSortedRows(payload);
+    }
+
+    async refreshModelDataFromApi() {
+        if (!navigator.onLine) return;
+        try {
+            const [predictions, anomalies, dailySummary, thresholds] = await Promise.all([
+                this.fetchSupabaseTable('predictions', 300),
+                this.fetchSupabaseTable('anomalies', 300),
+                this.fetchSupabaseTable('daily_summary', 120),
+                this.fetchSupabaseTable('thresholds', 20)
+            ]);
+            this.modelData = { predictions, anomalies, dailySummary, thresholds };
+            this.updateCharts();
+            this.updateStats();
+        } catch (err) {
+            console.warn('Model table fetch skipped:', err);
+        }
+    }
+
     getFetchErrorMessage(err) {
         const msg = String(err?.message || err || '');
         if (!navigator.onLine) return 'internet yok';
@@ -873,10 +941,12 @@ class App {
                         }
                         this.refreshLatestFromApi();
                         this.refreshHistoryFromApi();
+                        this.refreshModelDataFromApi();
                         // Supabase yazimi anlik gecikirse UI'i tekrar guncelle.
                         setTimeout(() => this.refreshLatestFromApi(), 600);
                         setTimeout(() => this.refreshLatestFromApi(), 1200);
                         setTimeout(() => this.refreshHistoryFromApi(), 1800);
+                        setTimeout(() => this.refreshModelDataFromApi(), 1500);
                     } else {
                         await this.connectBluetoothDevice();
                         await this.startBluetoothNotifications();
@@ -1842,6 +1912,78 @@ class App {
             });
         }
 
+        const predictionCanvas = document.getElementById('predictionChart');
+        if (predictionCanvas) {
+            const predictionCtx = predictionCanvas.getContext('2d');
+            this.charts.prediction = new Chart(predictionCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'LSTM Tahmin',
+                        data: [],
+                        borderColor: chartColors.accent,
+                        backgroundColor: 'rgba(129, 161, 193, 0.1)',
+                        borderWidth: 2,
+                        tension: 0.25,
+                        fill: true
+                    }, {
+                        label: 'Gerçek',
+                        data: [],
+                        borderColor: chartColors.high,
+                        backgroundColor: 'rgba(191, 97, 106, 0.05)',
+                        borderWidth: 2,
+                        tension: 0.25,
+                        fill: false
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: true } },
+                    scales: {
+                        y: { beginAtZero: false, ticks: { color: chartColors.text } },
+                        x: { ticks: { color: chartColors.text } }
+                    }
+                }
+            });
+        }
+
+        const anomalyCanvas = document.getElementById('anomalyChart');
+        if (anomalyCanvas) {
+            const anomalyCtx = anomalyCanvas.getContext('2d');
+            this.charts.anomaly = new Chart(anomalyCtx, {
+                type: 'bar',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'IF Skoru',
+                        data: [],
+                        backgroundColor: 'rgba(235, 203, 139, 0.6)',
+                        borderColor: chartColors.medium,
+                        borderWidth: 1
+                    }, {
+                        label: 'Threshold',
+                        data: [],
+                        type: 'line',
+                        borderColor: chartColors.high,
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        tension: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: true } },
+                    scales: {
+                        y: { beginAtZero: true, ticks: { color: chartColors.text } },
+                        x: { ticks: { color: chartColors.text } }
+                    }
+                }
+            });
+        }
+
         // Farmer mode charts
         this.initFarmerCharts(chartColors);
     }
@@ -1872,6 +2014,41 @@ class App {
             this.charts.weather.data.datasets[0].data = recentWeather.map((row) => row.temperature);
             this.charts.weather.data.datasets[1].data = recentWeather.map((row) => row.humidity);
             this.charts.weather.update();
+        }
+
+        if (this.charts.prediction) {
+            const rows = (this.modelData.predictions || []).slice(-40);
+            this.charts.prediction.data.labels = rows.map((row, idx) => {
+                const d = new Date(row.timestamp || row.created_at || row.day || row.date || 0);
+                if (Number.isNaN(d.getTime())) return `P${idx + 1}`;
+                return d.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+            });
+            this.charts.prediction.data.datasets[0].data = rows.map((row) =>
+                this.getNumericFromRow(row, ['predicted_tds', 'prediction', 'pred', 'forecast', 'yhat', 'lstm_pred', 'lstm_prediction'])
+            );
+            this.charts.prediction.data.datasets[1].data = rows.map((row) =>
+                this.getNumericFromRow(row, ['actual_tds', 'actual', 'observed', 'tds', 'salt'])
+            );
+            this.charts.prediction.update();
+        }
+
+        if (this.charts.anomaly) {
+            const rows = (this.modelData.anomalies || []).slice(-40);
+            const latestThresholdRow = (this.modelData.thresholds || []).slice(-1)[0] || null;
+            const thresholdValue = this.getNumericFromRow(latestThresholdRow, ['anomaly_threshold', 'iforest_threshold', 'threshold', 'score_threshold']);
+            this.charts.anomaly.data.labels = rows.map((row, idx) => {
+                const d = new Date(row.timestamp || row.created_at || row.day || row.date || 0);
+                if (Number.isNaN(d.getTime())) return `A${idx + 1}`;
+                return d.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+            });
+            this.charts.anomaly.data.datasets[0].data = rows.map((row) => {
+                const score = this.getNumericFromRow(row, ['anomaly_score', 'score', 'iforest_score', 'isolation_score']);
+                if (Number.isFinite(score)) return score;
+                const flag = this.getNumericFromRow(row, ['is_anomaly', 'anomaly', 'flag']);
+                return Number.isFinite(flag) ? flag : 0;
+            });
+            this.charts.anomaly.data.datasets[1].data = rows.map(() => (Number.isFinite(thresholdValue) ? thresholdValue : null));
+            this.charts.anomaly.update();
         }
     }
 
@@ -2142,8 +2319,18 @@ class App {
         const maxTds = Math.max(...tdsValues);
         const minTds = Math.min(...tdsValues);
         const stdTds = this.calculateStdDev(tdsValues);
-        const anomalyRate = ((count * 0.15).toFixed(0) + ' / ' + count);
-        
+        const anomalyRows = this.modelData.anomalies || [];
+        const windowRows = anomalyRows.slice(-50);
+        const anomalyCount = windowRows.filter((row) => {
+            const flag = this.getNumericFromRow(row, ['is_anomaly', 'anomaly', 'flag']);
+            if (Number.isFinite(flag)) return flag > 0;
+            const score = this.getNumericFromRow(row, ['anomaly_score', 'score', 'iforest_score', 'isolation_score']);
+            const thrRow = (this.modelData.thresholds || []).slice(-1)[0] || null;
+            const thr = this.getNumericFromRow(thrRow, ['anomaly_threshold', 'iforest_threshold', 'threshold', 'score_threshold']);
+            return Number.isFinite(score) && Number.isFinite(thr) && score >= thr;
+        }).length;
+        const anomalyRate = windowRows.length ? `${anomalyCount} / ${windowRows.length}` : ((count * 0.15).toFixed(0) + ' / ' + count);
+
         setText('sensorCount', count);
         setText('avgTds', avgTds.toFixed(0));
         setText('maxTds', maxTds.toFixed(0));
