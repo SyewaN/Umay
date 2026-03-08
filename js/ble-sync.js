@@ -51,15 +51,6 @@
     return null;
   }
 
-  function normalizeSaltForDb(value) {
-    if (!Number.isFinite(value)) return null;
-    const rounded = Math.round(value * 100) / 100;
-    if (Math.abs(rounded) > 999.99) {
-      return rounded > 0 ? 999.99 : -999.99;
-    }
-    return rounded;
-  }
-
   function toIsoTimestampFromNumericTime(value) {
     if (!Number.isFinite(value)) return null;
     let unixMs = null;
@@ -192,7 +183,7 @@
       return {
         original: row,
         payload: {
-          salt: normalizeSaltForDb(salt),
+          salt: Number.isFinite(salt) ? salt : null,
           sicaklik: Number.isFinite(sicaklik) ? sicaklik : null,
           sensor_id: row?.sensorId || row?.sensor_id || 'esp-t1'
         }
