@@ -754,6 +754,15 @@ class App {
         return null;
     }
 
+    getSeverityScore(row) {
+        const text = String(row?.severity || '').toLowerCase();
+        if (text.includes('high') || text.includes('kritik') || text.includes('critical')) return 3;
+        if (text.includes('med')) return 2;
+        if (text.includes('low')) return 1;
+        const numeric = this.parseNumeric(row?.severity);
+        return Number.isFinite(numeric) ? numeric : 0;
+    }
+
     async fetchSupabaseTable(tableName, limit = 200) {
         const endpoint = `${BLE_SYNC_BASE_URL}/rest/v1/${tableName}?select=*&limit=${limit}`;
         const res = await fetch(endpoint, { cache: 'no-store', headers: this.getSupabaseHeaders() });
@@ -767,19 +776,27 @@ class App {
 
     async refreshModelDataFromApi() {
         if (!navigator.onLine) return;
-        try {
-            const [predictions, anomalies, dailySummary, thresholds] = await Promise.all([
-                this.fetchSupabaseTable('predictions', 300),
-                this.fetchSupabaseTable('anomalies', 300),
-                this.fetchSupabaseTable('daily_summary', 120),
-                this.fetchSupabaseTable('thresholds', 20)
-            ]);
-            this.modelData = { predictions, anomalies, dailySummary, thresholds };
-            this.updateCharts();
-            this.updateStats();
-        } catch (err) {
-            console.warn('Model table fetch skipped:', err);
-        }
+        const [predictionsRes, anomaliesRes, dailySummaryRes, thresholdsRes] = await Promise.allSettled([
+            this.fetchSupabaseTable('predictions', 300),
+            this.fetchSupabaseTable('anomalies', 300),
+            this.fetchSupabaseTable('daily_summary', 120),
+            this.fetchSupabaseTable('thresholds', 20)
+        ]);
+
+        this.modelData = {
+            predictions: predictionsRes.status === 'fulfilled' ? predictionsRes.value : (this.modelData.predictions || []),
+            anomalies: anomaliesRes.status === 'fulfilled' ? anomaliesRes.value : (this.modelData.anomalies || []),
+            dailySummary: dailySummaryRes.status === 'fulfilled' ? dailySummaryRes.value : (this.modelData.dailySummary || []),
+            thresholds: thresholdsRes.status === 'fulfilled' ? thresholdsRes.value : (this.modelData.thresholds || [])
+        };
+
+        if (predictionsRes.status === 'rejected') console.warn('predictions fetch skipped:', predictionsRes.reason);
+        if (anomaliesRes.status === 'rejected') console.warn('anomalies fetch skipped:', anomaliesRes.reason);
+        if (dailySummaryRes.status === 'rejected') console.warn('daily_summary fetch skipped:', dailySummaryRes.reason);
+        if (thresholdsRes.status === 'rejected') console.warn('thresholds fetch skipped:', thresholdsRes.reason);
+
+        this.updateCharts();
+        this.updateStats();
     }
 
     getFetchErrorMessage(err) {
@@ -2024,10 +2041,10 @@ class App {
                 return d.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
             });
             this.charts.prediction.data.datasets[0].data = rows.map((row) =>
-                this.getNumericFromRow(row, ['predicted_tds', 'prediction', 'pred', 'forecast', 'yhat', 'lstm_pred', 'lstm_prediction'])
+                this.getNumericFromRow(row, ['predicted_salt', 'predicted_tds', 'prediction', 'pred', 'forecast', 'yhat', 'lstm_pred', 'lstm_prediction'])
             );
             this.charts.prediction.data.datasets[1].data = rows.map((row) =>
-                this.getNumericFromRow(row, ['actual_tds', 'actual', 'observed', 'tds', 'salt'])
+                this.getNumericFromRow(row, ['predicted_sicaklik', 'actual_tds', 'actual', 'observed', 'tds', 'salt'])
             );
             this.charts.prediction.update();
         }
@@ -2045,10 +2062,33 @@ class App {
                 const score = this.getNumericFromRow(row, ['anomaly_score', 'score', 'iforest_score', 'isolation_score']);
                 if (Number.isFinite(score)) return score;
                 const flag = this.getNumericFromRow(row, ['is_anomaly', 'anomaly', 'flag']);
-                return Number.isFinite(flag) ? flag : 0;
+                if (Number.isFinite(flag)) return flag;
+                return this.getSeverityScore(row);
             });
             this.charts.anomaly.data.datasets[1].data = rows.map(() => (Number.isFinite(thresholdValue) ? thresholdValue : null));
             this.charts.anomaly.update();
+        }
+
+        if (this.charts.farmerPrediction) {
+            const rows = (this.modelData.predictions || []).slice(-12);
+            this.charts.farmerPrediction.data.labels = rows.map((row, idx) => {
+                const d = new Date(row.created_at || row.timestamp || 0);
+                if (Number.isNaN(d.getTime())) return `T${idx + 1}`;
+                return d.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+            });
+            this.charts.farmerPrediction.data.datasets[0].data = rows.map((row) =>
+                this.getNumericFromRow(row, ['predicted_salt', 'prediction', 'pred'])
+            );
+            this.charts.farmerPrediction.update();
+        }
+
+        if (this.charts.farmerAnomalyMini) {
+            const rows = (this.modelData.anomalies || []).slice(-20);
+            const total = rows.length;
+            const unresolved = rows.filter((row) => !row?.resolved).length;
+            const safeTotal = total > 0 ? total : 1;
+            this.charts.farmerAnomalyMini.data.datasets[0].data = [unresolved, Math.max(0, safeTotal - unresolved)];
+            this.charts.farmerAnomalyMini.update();
         }
     }
 
@@ -2200,6 +2240,55 @@ class App {
                 }
             });
         }
+
+        const farmerPredictionCtx = document.getElementById('farmerPredictionChart')?.getContext('2d');
+        if (farmerPredictionCtx) {
+            this.charts.farmerPrediction = new Chart(farmerPredictionCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Tahmin Tuz',
+                        data: [],
+                        borderColor: chartColors.accent,
+                        backgroundColor: 'rgba(129, 161, 193, 0.12)',
+                        borderWidth: 2,
+                        tension: 0.3,
+                        fill: true
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        y: { beginAtZero: false, ticks: { color: chartColors.text } },
+                        x: { ticks: { color: chartColors.text } }
+                    }
+                }
+            });
+        }
+
+        const farmerAnomalyCtx = document.getElementById('farmerAnomalyChart')?.getContext('2d');
+        if (farmerAnomalyCtx) {
+            this.charts.farmerAnomalyMini = new Chart(farmerAnomalyCtx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Açık', 'Normal'],
+                    datasets: [{
+                        data: [0, 1],
+                        backgroundColor: [chartColors.high, chartColors.low],
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    cutout: '65%',
+                    plugins: { legend: { position: 'bottom' } }
+                }
+            });
+        }
     }
 
     updateFarmerCharts() {
@@ -2322,12 +2411,14 @@ class App {
         const anomalyRows = this.modelData.anomalies || [];
         const windowRows = anomalyRows.slice(-50);
         const anomalyCount = windowRows.filter((row) => {
+            if (typeof row?.resolved === 'boolean') return row.resolved === false;
             const flag = this.getNumericFromRow(row, ['is_anomaly', 'anomaly', 'flag']);
             if (Number.isFinite(flag)) return flag > 0;
             const score = this.getNumericFromRow(row, ['anomaly_score', 'score', 'iforest_score', 'isolation_score']);
             const thrRow = (this.modelData.thresholds || []).slice(-1)[0] || null;
             const thr = this.getNumericFromRow(thrRow, ['anomaly_threshold', 'iforest_threshold', 'threshold', 'score_threshold']);
-            return Number.isFinite(score) && Number.isFinite(thr) && score >= thr;
+            if (Number.isFinite(score) && Number.isFinite(thr)) return score >= thr;
+            return this.getSeverityScore(row) >= 2;
         }).length;
         const anomalyRate = windowRows.length ? `${anomalyCount} / ${windowRows.length}` : ((count * 0.15).toFixed(0) + ' / ' + count);
 
