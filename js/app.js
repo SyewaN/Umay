@@ -14,11 +14,7 @@ const BLE_SYNC_DEFAULT_API_URL = `${BLE_SYNC_BASE_URL}/rest/v1/sensor_data`;
 const BLE_SYNC_DEFAULT_READ_URL = `${BLE_SYNC_BASE_URL}/rest/v1/sensor_data?select=*&order=id.desc&limit=200`;
 const BLE_SYNC_API_URL = window.BLE_SYNC_API_URL || BLE_SYNC_DEFAULT_API_URL;
 const BLE_SYNC_READ_URL = window.BLE_SYNC_READ_URL || BLE_SYNC_DEFAULT_READ_URL;
-const BLE_SYNC_READ_ENABLED = (
-    window.BLE_SYNC_READ_ENABLED ??
-    localStorage.getItem('ble-sync-read-enabled') ??
-    'true'
-) === 'true';
+const BLE_SYNC_READ_ENABLED = String(window.BLE_SYNC_READ_ENABLED ?? 'true') === 'true';
 const DASHBOARD_ENDPOINT = window.HYDROSENSE_DASHBOARD_URL ||
     localStorage.getItem('hydrosense-dashboard-url') ||
     '';
@@ -37,6 +33,10 @@ const WEATHER_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
 
 // Eski localStorage override'lari yanlis endpoint'e tasiyabildigi icin temizle.
 try {
+    const legacyReadEnabled = localStorage.getItem('ble-sync-read-enabled');
+    if (legacyReadEnabled !== null) {
+        localStorage.removeItem('ble-sync-read-enabled');
+    }
     const legacyKey = localStorage.getItem('ble-sync-api-key');
     if (legacyKey && legacyKey !== BLE_SYNC_API_KEY) {
         localStorage.removeItem('ble-sync-api-key');
@@ -869,6 +869,9 @@ class App {
                         }
                         this.refreshLatestFromApi();
                         this.refreshHistoryFromApi();
+                        // Supabase yazimi anlik gecikirse UI'i tekrar guncelle.
+                        setTimeout(() => this.refreshLatestFromApi(), 600);
+                        setTimeout(() => this.refreshHistoryFromApi(), 1200);
                     } else {
                         await this.connectBluetoothDevice();
                         await this.startBluetoothNotifications();
