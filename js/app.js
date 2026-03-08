@@ -59,7 +59,7 @@ window.BLE_SYNC_API_HEADERS = BLE_SYNC_API_KEY
     ? {
         apikey: BLE_SYNC_API_KEY,
         Authorization: `Bearer ${BLE_SYNC_API_KEY}`,
-        Prefer: 'return=minimal'
+        Prefer: 'return=representation'
     }
     : {};
 
@@ -72,7 +72,7 @@ function sendToAPI(data) {
                 "Content-Type": "application/json",
                 apikey: BLE_SYNC_API_KEY,
                 Authorization: `Bearer ${BLE_SYNC_API_KEY}`,
-                Prefer: 'return=minimal'
+                Prefer: 'return=representation'
             }
         ]
         : [{ "Content-Type": "application/json" }];
@@ -576,9 +576,8 @@ class App {
     async refreshLatestFromApi() {
         if (!BLE_SYNC_READ_ENABLED || !navigator.onLine) return;
         try {
-            const history = await this.fetchDashboardHistory();
-            if (!history.length) return;
-            const latest = history[0];
+            const latest = await this.fetchLatestRecord();
+            if (!latest) return;
             const normalized = this.normalizeSyncedReading(latest);
             if (!normalized) return;
             this.latestReading = normalized;
@@ -591,6 +590,22 @@ class App {
             console.error('Latest API fetch failed:', err);
             this.updateDataStatus(`Latest fetch: ${this.getFetchErrorMessage(err)}`);
         }
+    }
+
+    async fetchLatestRecord() {
+        const headers = {
+            Accept: 'application/json',
+            ...window.BLE_SYNC_API_HEADERS
+        };
+        const endpoint = `${BLE_SYNC_BASE_URL}/rest/v1/sensor_data?select=*&order=id.desc&limit=1&_ts=${Date.now()}`;
+        const res = await fetch(endpoint, { cache: 'no-store', headers });
+        if (!res.ok) {
+            const body = await res.text();
+            throw new Error(`Latest fetch HTTP ${res.status} (${endpoint}) ${body || ''}`.trim());
+        }
+        const payload = await res.json();
+        if (!Array.isArray(payload) || !payload.length) return null;
+        return payload[0];
     }
 
     /**
@@ -637,8 +652,8 @@ class App {
             ...window.BLE_SYNC_API_HEADERS
         };
         const endpoints = [
-            BLE_SYNC_READ_URL,
-            `${BLE_SYNC_BASE_URL}/rest/v1/sensor_data?select=*&order=id.desc&limit=200`
+            `${BLE_SYNC_READ_URL}${BLE_SYNC_READ_URL.includes('?') ? '&' : '?'}_ts=${Date.now()}`,
+            `${BLE_SYNC_BASE_URL}/rest/v1/sensor_data?select=*&order=id.desc&limit=200&_ts=${Date.now()}`
         ];
 
         const normalizePayloadToArray = (payload) => {
