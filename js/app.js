@@ -597,7 +597,7 @@ class App {
             Accept: 'application/json',
             ...window.BLE_SYNC_API_HEADERS
         };
-        const endpoint = `${BLE_SYNC_BASE_URL}/rest/v1/sensor_data?select=*&order=id.desc&limit=1&_ts=${Date.now()}`;
+        const endpoint = `${BLE_SYNC_BASE_URL}/rest/v1/sensor_data?select=*&order=id.desc&limit=1`;
         const res = await fetch(endpoint, { cache: 'no-store', headers });
         if (!res.ok) {
             const body = await res.text();
@@ -652,8 +652,8 @@ class App {
             ...window.BLE_SYNC_API_HEADERS
         };
         const endpoints = [
-            `${BLE_SYNC_READ_URL}${BLE_SYNC_READ_URL.includes('?') ? '&' : '?'}_ts=${Date.now()}`,
-            `${BLE_SYNC_BASE_URL}/rest/v1/sensor_data?select=*&order=id.desc&limit=200&_ts=${Date.now()}`
+            BLE_SYNC_READ_URL,
+            `${BLE_SYNC_BASE_URL}/rest/v1/sensor_data?select=*&order=id.desc&limit=200`
         ];
 
         const normalizePayloadToArray = (payload) => {
