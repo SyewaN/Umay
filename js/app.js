@@ -445,11 +445,7 @@ class App {
             this.updateCharts();
             this.updateDataStatus();
             if (navigator.onLine) {
-                Promise.allSettled(readings.map((row) => sendToAPI(this.toApiPayload(row))))
-                    .then((results) => {
-                        const hasFailure = results.some((r) => r.status === 'rejected');
-                        if (hasFailure) this.updateDataStatus('API gönderimi kısmen başarısız, localde saklandı');
-                    });
+                this.sendStoredDataToServer().catch(() => {});
             }
         } catch (err) {
             this.updateDataStatus('JSON parse hatası');
@@ -595,6 +591,8 @@ class App {
     async fetchLatestRecord() {
         const headers = {
             Accept: 'application/json',
+            'Cache-Control': 'no-cache',
+            Pragma: 'no-cache',
             ...window.BLE_SYNC_API_HEADERS
         };
         const endpoint = `${BLE_SYNC_BASE_URL}/rest/v1/sensor_data?select=*&order=id.desc&limit=1`;
@@ -649,6 +647,8 @@ class App {
     async fetchDashboardHistory() {
         const headers = {
             Accept: 'application/json',
+            'Cache-Control': 'no-cache',
+            Pragma: 'no-cache',
             ...window.BLE_SYNC_API_HEADERS
         };
         const endpoints = [
@@ -858,7 +858,6 @@ class App {
                         this.updateConnectionStatus('Cihaz bağlı');
                         if (normalized) {
                             try {
-                                await sendToAPI(this.toApiPayload(normalized));
                                 await this.sendStoredDataToServer();
                                 uploadError = null;
                             } catch (postErr) {
@@ -876,7 +875,8 @@ class App {
                         this.refreshHistoryFromApi();
                         // Supabase yazimi anlik gecikirse UI'i tekrar guncelle.
                         setTimeout(() => this.refreshLatestFromApi(), 600);
-                        setTimeout(() => this.refreshHistoryFromApi(), 1200);
+                        setTimeout(() => this.refreshLatestFromApi(), 1200);
+                        setTimeout(() => this.refreshHistoryFromApi(), 1800);
                     } else {
                         await this.connectBluetoothDevice();
                         await this.startBluetoothNotifications();
