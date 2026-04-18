@@ -128,6 +128,7 @@ class App {
         this.language = 'tr';
         this.translations = this.buildTranslations();
         this.latestReading = null;
+        this.selectedCrop = 'misir';
         this.bleDevice = null;
         this.bleServer = null;
         this.bleCharacteristic = null;
@@ -752,6 +753,111 @@ class App {
             if (Number.isFinite(val)) return val;
         }
         return null;
+    }
+
+    // ====== DECISION SUPPORT (Maas–Hoffman) ======
+    normalizeCropKey(raw) {
+        return String(raw || '')
+            .toLowerCase()
+            .trim()
+            .replace(/ı/g, 'i')
+            .replace(/ğ/g, 'g')
+            .replace(/ş/g, 's')
+            .replace(/ç/g, 'c')
+            .replace(/ö/g, 'o')
+            .replace(/ü/g, 'u')
+            .replace(/\s+/g, '_');
+    }
+
+    getCropParams(cropRaw) {
+        const crop = this.normalizeCropKey(cropRaw);
+        const CROPS = {
+            misir: { A: 1.7, B: 12 },
+            bugday: { A: 6.0, B: 7 },
+            arpa: { A: 8.0, B: 5 },
+            domates: { A: 2.5, B: 9.9 },
+            yonca: { A: 2.0, B: 7.3 },
+            seker_pancari: { A: 7.0, B: 5.9 }
+        };
+        return CROPS[crop] || null;
+    }
+
+    calculateYield(ec, A, B) {
+        if (ec <= A) return 100;
+        return Math.max(0, 100 - B * (ec - A));
+    }
+
+    riskAnalysis(ec, A) {
+        if (ec < A) return 'GUVENLI';
+        if (ec < A + 1) return 'ORTA_RISK';
+        return 'YUKSEK_RISK';
+    }
+
+    buildDecisionSupport(cropRaw, ecValue) {
+        const params = this.getCropParams(cropRaw);
+        if (!params || !Number.isFinite(ecValue)) {
+            return {
+                error: 'Yetersiz veri',
+                bitki: cropRaw || null,
+                EC_dS_m: Number.isFinite(ecValue) ? ecValue : null
+            };
+        }
+        const { A, B } = params;
+        const verim = this.calculateYield(ecValue, A, B);
+        const risk = this.riskAnalysis(ecValue, A);
+        const suKaybi = 100 - verim;
+
+        let sulama = '';
+        let urunDegisim = '';
+        let riskUyarisi = '';
+        if (risk === 'GUVENLI') {
+            sulama = 'Mevcut sulama rejimi uygun, EC takibi yeterli.';
+            urunDegisim = 'Ürün değişimine gerek yok.';
+            riskUyarisi = 'Risk düşük, düzenli izleme sürdürülmeli.';
+        } else if (risk === 'ORTA_RISK') {
+            sulama = 'Tuz birikimini azaltmak için sulama optimize edilmeli, mümkünse düşük EC’li su kullanılmalı.';
+            urunDegisim = 'Mevcut ürün korunabilir; tuza daha dayanıklı türler alternatif olarak değerlendirilebilir.';
+            riskUyarisi = 'Orta risk: EC eşiğine yakın, artış halinde verim kaybı hızlanır.';
+        } else {
+            sulama = 'Yıkama sulaması ve daha düşük EC’li kaynak önerilir.';
+            urunDegisim = 'Daha dayanıklı ürünlere geçiş değerlendirilmeli (ör. arpa, şeker pancarı).';
+            riskUyarisi = 'Yüksek risk: EC eşiği belirgin aşıldı, verim kaybı artıyor.';
+        }
+
+        return {
+            bitki: this.normalizeCropKey(cropRaw),
+            EC_dS_m: Number(ecValue.toFixed(2)),
+            verim_yuzde: Number(verim.toFixed(2)),
+            risk,
+            su_kaybi_yuzde: Number(suKaybi.toFixed(2)),
+            oneriler: {
+                sulama_onerisi: sulama,
+                urun_degisim_onerisi: urunDegisim,
+                risk_uyarisi: riskUyarisi
+            }
+        };
+    }
+
+    getCurrentEcFromTds(tdsValue) {
+        if (!Number.isFinite(tdsValue)) return null;
+        return tdsValue / 640;
+    }
+
+    getLatestPredictedEc() {
+        const rows = (this.modelData.predictions || []).slice(-1);
+        if (!rows.length) return null;
+        const pred = this.getNumericFromRow(rows[0], [
+            'predicted_salt',
+            'predicted_tds',
+            'prediction',
+            'pred',
+            'forecast',
+            'yhat',
+            'lstm_pred',
+            'lstm_prediction'
+        ]);
+        if (!Number.isFinite(pred)) return null;
+        return this.getCurrentEcFromTds(pred);
     }
 
     getSeverityScore(row) {

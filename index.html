@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Alşimist</title>
+    <title></title>
     <meta name="theme-color" content="#ECEEF4">
     <link rel="icon" type="image/png" href="favicon.png">
     <link rel="manifest" href="manifest.webmanifest">
@@ -23,7 +23,7 @@
                         <i class="fas fa-bars"></i>
                     </button>
                     <img src="icon.png" alt="Logo" class="navbar-logo">
-                    <span class="navbar-title">Alşimist</span>
+                    <span class="navbar-title">Umay</span>
                 </div>
             </div>
 
@@ -287,6 +287,26 @@
                                 </div>
                                 <div class="chart-container">
                                     <canvas id="farmerAnomalyChart"></canvas>
+                                </div>
+                            </div>
+
+                            <div class="chart-card">
+                                <div class="chart-header">
+                                    <h3>🧠 Karar Destek</h3>
+                                    <span class="chart-meta">EC tabanlı</span>
+                                </div>
+                                <div class="chart-container">
+                                    <label for="cropSelect" style="display:block;margin-bottom:8px;font-weight:600;">Ekilen ürün</label>
+                                    <select id="cropSelect" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid #d7dde8;">
+                                        <option value="misir">Mısır</option>
+                                        <option value="bugday">Buğday</option>
+                                        <option value="arpa">Arpa</option>
+                                        <option value="domates">Domates</option>
+                                        <option value="yonca">Yonca</option>
+                                        <option value="seker_pancari">Şeker pancarı</option>
+                                    </select>
+                                    <pre id="decisionSupportOutput" style="white-space:pre-wrap;margin-top:12px;padding:10px;border-radius:8px;background:#f3f5f9;border:1px solid #e2e7f0;max-height:240px;overflow:auto;"></pre>
+                                    <div id="decisionSupportNote" style="margin-top:10px;font-size:13px;color:#4d576a;"></div>
                                 </div>
                             </div>
                         </div>
